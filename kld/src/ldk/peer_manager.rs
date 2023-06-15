@@ -1,78 +1,105 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+use crate::bitcoind::{BitcoindClient, BitcoindUtxoLookup};
 use crate::database::{peer::Peer, LdkDatabase};
-use anyhow::{anyhow, bail, Context, Result};
+use crate::ldk::ChainMonitor;
+use crate::ldk::ChannelManager;
+use crate::logger::KldLogger;
+use anyhow::{anyhow, Context, Result};
+use api::lightning::ln::peer_handler::SimpleArcPeerManager;
 use api::NetAddress;
+use async_trait::async_trait;
 use bitcoin::secp256k1::PublicKey;
-use log::{error, info};
-use settings::Settings;
+use lightning_net_tokio::SocketDescriptor;
+use log::{error, info, warn};
 use tokio::task::JoinHandle;
 
-use super::{ChannelManager, LdkPeerManager};
+pub type PeerManager = SimpleArcPeerManager<
+    SocketDescriptor,
+    ChainMonitor,
+    BitcoindClient,
+    BitcoindClient,
+    BitcoindUtxoLookup,
+    KldLogger,
+>;
 
-pub struct PeerManager {
-    ldk_peer_manager: Arc<LdkPeerManager>,
-    channel_manager: Arc<ChannelManager>,
-    database: Arc<LdkDatabase>,
-    settings: Arc<Settings>,
-    addresses: Vec<NetAddress>,
+#[async_trait]
+pub trait KuutamoPeerManger {
+    async fn listen(&self, port: u16) -> Result<()>;
+
+    async fn connect_peer(
+        &self,
+        database: Arc<LdkDatabase>,
+        public_key: PublicKey,
+        peer_addr: NetAddress,
+    ) -> Result<()>;
+
+    fn keep_channel_peers_connected(
+        &self,
+        database: Arc<LdkDatabase>,
+        channel_manager: Arc<ChannelManager>,
+    );
+
+    // Regularly broadcast our node_announcement. This is only required (or possible) if we have
+    // some public channels, and is only useful if we have public listen address(es) to announce.
+    // In a production environment, this should occur only after the announcement of new channels
+    // to avoid churn in the global network graph.
+    fn regularly_broadcast_node_announcement(&self, node_alias: String, addresses: Vec<NetAddress>);
+
+    fn get_connected_peers(&self) -> Vec<(PublicKey, Option<NetAddress>)>;
+
+    fn is_connected(&self, public_key: &PublicKey) -> bool;
+
+    async fn disconnect_and_drop_by_node_id(
+        &self,
+        database: Arc<LdkDatabase>,
+        node_id: PublicKey,
+    ) -> Result<()>;
 }
 
-impl PeerManager {
-    pub fn new(
-        ldk_peer_manager: Arc<LdkPeerManager>,
-        channel_manager: Arc<ChannelManager>,
-        database: Arc<LdkDatabase>,
-        settings: Arc<Settings>,
-    ) -> Result<PeerManager> {
-        if settings.node_alias.len() > 32 {
-            bail!("Node Alias can not be longer than 32 bytes");
-        }
-        let addresses = settings.public_addresses();
-        Ok(PeerManager {
-            ldk_peer_manager,
-            channel_manager,
-            database,
-            settings,
-            addresses,
-        })
-    }
-
-    pub async fn listen(&self) {
-        let listener =
-            tokio::net::TcpListener::bind(format!("0.0.0.0:{}", self.settings.peer_port))
-                .await
-                .context("Failed to bind to listen port")
-                .unwrap();
-        let ldk_peer_manager = self.ldk_peer_manager.clone();
+#[async_trait]
+impl KuutamoPeerManger for Arc<PeerManager> {
+    async fn listen(&self, port: u16) -> Result<()>{
+        let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port:}"))
+            .await
+            .context("Failed to bind to listen port")?;
+        let peer_manager = self.clone();
         tokio::spawn(async move {
             loop {
-                let peer_mgr = ldk_peer_manager.clone();
-                let (tcp_stream, socket_addr) = listener.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let disconnected = lightning_net_tokio::setup_inbound(
-                        peer_mgr.clone(),
-                        tcp_stream.into_std().unwrap(),
-                    );
-                    info!("Inbound peer connection from {socket_addr}");
-                    disconnected.await;
-                    info!("Inbound peer disconnected from {socket_addr}");
-                });
+                let peer_mgr = peer_manager.clone();
+                match listener.accept().await {
+                    Ok((tcp_stream, socket_addr)) => {
+                        if let Ok(tcp_stream) = tcp_stream.into_std() {
+                            tokio::spawn(async move {
+                                let disconnected = lightning_net_tokio::setup_inbound(
+                                    peer_mgr.clone(),
+                                    tcp_stream,
+                                );
+                                info!("Inbound peer connection from {socket_addr}");
+                                disconnected.await;
+                                info!("Inbound peer disconnected from {socket_addr}");
+                            });
+                        } else {
+                            warn!("tokio tcp stream fail into standard stream")
+                        }
+                    },
+                    Err(e) => warn!("fail to acept peer socket {e}")
+                }
             }
         });
+        Ok(())
     }
 
-    pub async fn connect_peer(&self, public_key: PublicKey, peer_addr: NetAddress) -> Result<()> {
+    async fn connect_peer(
+        &self,
+        database: Arc<LdkDatabase>,
+        public_key: PublicKey,
+        peer_addr: NetAddress,
+    ) -> Result<()> {
         if self.is_connected(&public_key) {
             return Ok(());
         }
-        let handle = connect_peer(
-            self.ldk_peer_manager.clone(),
-            self.database.clone(),
-            public_key,
-            peer_addr,
-        )
-        .await?;
+        let handle = connect_peer(self.clone(), database, public_key, peer_addr).await?;
         loop {
             if self.is_connected(&public_key) {
                 return Ok(());
@@ -84,13 +111,15 @@ impl PeerManager {
         }
     }
 
-    pub fn keep_channel_peers_connected(&self) {
-        let database = self.database.clone();
-        let ldk_peer_manager = self.ldk_peer_manager.clone();
-        let channel_manager = self.channel_manager.clone();
+    fn keep_channel_peers_connected(
+        &self,
+        database: Arc<LdkDatabase>,
+        channel_manager: Arc<ChannelManager>,
+    ) {
+        let peer_manager = self.clone();
         tokio::spawn(async move {
             loop {
-                let connected_node_ids = ldk_peer_manager.get_peer_node_ids();
+                let connected_node_ids = peer_manager.get_peer_node_ids();
                 for unconnected_node_id in channel_manager
                     .list_channels()
                     .iter()
@@ -100,7 +129,7 @@ impl PeerManager {
                     match database.fetch_peer(&unconnected_node_id).await {
                         Ok(Some(peer)) => {
                             let _ = connect_peer(
-                                ldk_peer_manager.clone(),
+                                peer_manager.clone(),
                                 database.clone(),
                                 peer.public_key,
                                 peer.net_address.into(),
@@ -116,21 +145,16 @@ impl PeerManager {
         });
     }
 
-    // Regularly broadcast our node_announcement. This is only required (or possible) if we have
-    // some public channels, and is only useful if we have public listen address(es) to announce.
-    // In a production environment, this should occur only after the announcement of new channels
-    // to avoid churn in the global network graph.
-    pub fn regularly_broadcast_node_announcement(&self) {
+    fn regularly_broadcast_node_announcement(
+        &self,
+        node_alias: String,
+        addresses: Vec<NetAddress>,
+    ) {
         let mut alias = [0; 32];
-        alias[..self.settings.node_alias.len()]
-            .copy_from_slice(self.settings.node_alias.as_bytes());
-        let peer_manager = self.ldk_peer_manager.clone();
-        let addresses: Vec<api::lightning::ln::msgs::NetAddress> = self
-            .addresses
-            .clone()
-            .into_iter()
-            .map(|a| a.inner())
-            .collect();
+        alias[..node_alias.len()].copy_from_slice(node_alias.as_bytes());
+        let peer_manager = self.clone();
+        let addresses: Vec<api::lightning::ln::msgs::NetAddress> =
+            addresses.into_iter().map(|a| a.inner()).collect();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(60));
             loop {
@@ -140,33 +164,29 @@ impl PeerManager {
         });
     }
 
-    pub fn get_connected_peers(&self) -> Vec<(PublicKey, Option<NetAddress>)> {
-        self.ldk_peer_manager
-            .get_peer_node_ids()
+    fn get_connected_peers(&self) -> Vec<(PublicKey, Option<NetAddress>)> {
+        self.get_peer_node_ids()
             .into_iter()
             .map(|(k, a)| (k, a.map(NetAddress::from)))
             .collect()
     }
 
-    pub fn is_connected(&self, public_key: &PublicKey) -> bool {
-        self.ldk_peer_manager
-            .get_peer_node_ids()
-            .iter()
-            .any(|p| p.0 == *public_key)
+    fn is_connected(&self, public_key: &PublicKey) -> bool {
+        self.get_peer_node_ids().iter().any(|p| p.0 == *public_key)
     }
 
-    pub async fn disconnect_by_node_id(&self, node_id: PublicKey) -> Result<()> {
-        self.ldk_peer_manager.disconnect_by_node_id(node_id);
-        self.database.delete_peer(&node_id).await
-    }
-
-    pub fn disconnect_all_peers(&self) {
-        self.ldk_peer_manager.disconnect_all_peers();
+    async fn disconnect_and_drop_by_node_id(
+        &self,
+        database: Arc<LdkDatabase>,
+        node_id: PublicKey,
+    ) -> Result<()> {
+        self.disconnect_by_node_id(node_id);
+        database.delete_peer(&node_id).await
     }
 }
 
 async fn connect_peer(
-    ldk_peer_manager: Arc<LdkPeerManager>,
+    ldk_peer_manager: Arc<PeerManager>,
     database: Arc<LdkDatabase>,
     public_key: PublicKey,
     peer_address: NetAddress,

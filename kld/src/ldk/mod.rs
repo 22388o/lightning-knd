@@ -17,34 +17,21 @@ use api::lightning::{
     ln::{
         channelmanager::{PaymentSendFailure, RetryableSendFailure, SimpleArcChannelManager},
         msgs::LightningError,
-        peer_handler::SimpleArcPeerManager,
     },
     onion_message::SimpleArcOnionMessenger,
     routing::{gossip, router::DefaultRouter, scoring::ProbabilisticScorerUsingTime},
     util::errors::APIError,
 };
 use lightning_invoice::SignOrCreationError;
-use lightning_net_tokio::SocketDescriptor;
 
 pub use controller::Controller;
 pub use lightning_interface::{LightningInterface, OpenChannelResult, Peer, PeerStatus};
 use log::warn;
 
-use crate::bitcoind::{BitcoindClient, BitcoindUtxoLookup};
+use crate::bitcoind::BitcoindClient;
 
 /// The minimum feerate we are allowed to send, as specify by LDK (sats/kwu).
 pub static MIN_FEERATE: u32 = 253;
-
-pub type NetworkGraph = gossip::NetworkGraph<Arc<KldLogger>>;
-
-pub(crate) type LdkPeerManager = SimpleArcPeerManager<
-    SocketDescriptor,
-    ChainMonitor,
-    BitcoindClient,
-    BitcoindClient,
-    BitcoindUtxoLookup,
-    KldLogger,
->;
 
 pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
     InMemorySigner,
@@ -55,6 +42,7 @@ pub(crate) type ChainMonitor = chainmonitor::ChainMonitor<
     Arc<LdkDatabase>,
 >;
 
+pub type NetworkGraph = gossip::NetworkGraph<Arc<KldLogger>>;
 pub(crate) type ChannelManager =
     SimpleArcChannelManager<ChainMonitor, BitcoindClient, BitcoindClient, KldLogger>;
 
