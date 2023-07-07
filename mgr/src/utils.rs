@@ -1,5 +1,6 @@
 //! utils for deploy and control remote machines
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use std::path::Path;
 use std::process::{Command, Output};
 
 use super::Host;
@@ -21,4 +22,23 @@ pub fn timeout_ssh(host: &Host, command: &[&str], learn_known_host_key: bool) ->
         .output()
         .context("Failed to run ssh...")?;
     Ok(output)
+}
+
+/// execute ssh remote copy
+pub fn timeout_scp(host: &Host, src: String, dst: &Path) -> Result<()> {
+    let target = host.deploy_ssh_target();
+    let args = vec![
+        format!("{target}:{src}"),
+        dst.to_str()
+            .ok_or(anyhow!("destination of scp is invalid"))?
+            .into(),
+    ];
+    println!("$ scp {}", args.join(" "));
+    Command::new("scp")
+        .args(args)
+        .spawn()
+        .context("Failed to run scp...")?
+        .wait()
+        .context("Failed to wait on scp child")?;
+    Ok(())
 }
