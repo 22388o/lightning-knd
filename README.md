@@ -176,42 +176,6 @@ If you have multiple hosts in `kneard.toml` and want to use different tokens for
 
 Alternatively, if you prefer to self-monitor the node, you can customize your monitor server by setting the `self_monitoring_url`, `self_monitoring_username`, and `self_monitoring_password` fields of the host. The `self_monitoring_url` should implement [Prometheus's Remote Write API](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write).
 
-## Secrets
-`kld-mgr` will help to generate secrets(default under secrets folder) when deploy, including
-- certificates for ssl connections between nodes
-    ```text
-cockroachdb
-├── ca.crt
-├── ca.key
-├── client.kld.crt
-├── client.kld.key
-├── client.root.crt
-├── client.root.key
-├── db-11.node.crt
-├── db-11.node.key
-├── db-12.node.crt
-├── db-12.node.key
-├── kld-10.node.crt
-└── kld-10.node.key
-lightning
-├── ca.key
-├── ca.pem
-├── cert.conf
-├── db-11.key
-├── db-11.pem
-├── db-12.key
-├── db-12.pem
-├── kld-10.key
-└── kld-10.pem
-    ```
-- macaroons for rest api of kld service
-```text
-access.macaroon
-admin.macaroon
-readonly.macaroon
-```
-- mnemonic phrase for bitcoin private key
-
 ## Further Information
 
 - [kld v0.0.1-alpha6 install guide Google slides](https://docs.google.com/presentation/d/1MfzXU3pHnGyMZFql3ga00lrOpOwLCJB8Nq0-CEsyn9U)

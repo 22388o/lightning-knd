@@ -34,10 +34,6 @@ struct InstallArgs {
     /// Do not reboot after installation
     #[clap(long, action)]
     no_reboot: bool,
-
-    /// Keep all the secret
-    #[clap(long, default_value = "false")]
-    keep_secrets: bool,
 }
 
 #[derive(clap::Args, PartialEq, Debug, Clone)]
@@ -51,10 +47,6 @@ struct DryUpdateArgs {
     /// Comma-separated lists of hosts to perform the dry-update
     #[clap(long, default_value = "")]
     hosts: String,
-
-    /// Keep all the secret
-    #[clap(long)]
-    keep_secrets: bool,
 }
 
 #[derive(clap::Args, PartialEq, Debug, Clone)]
@@ -62,10 +54,6 @@ struct UpdateArgs {
     /// Comma-separated lists of hosts to perform the update
     #[clap(long, default_value = "")]
     hosts: String,
-
-    /// Keep all the secret
-    #[clap(long, default_value = "false")]
-    keep_secrets: bool,
 }
 
 #[derive(clap::Args, PartialEq, Debug, Clone)]
@@ -83,10 +71,6 @@ struct RebootArgs {
     /// Comma-separated lists of hosts to perform the reboot
     #[clap(long, default_value = "")]
     hosts: String,
-
-    /// Keep all the secret
-    #[clap(long, default_value = "false")]
-    keep_secrets: bool,
 }
 
 #[derive(clap::Args, PartialEq, Debug, Clone)]
@@ -125,10 +109,6 @@ struct RollbackArgs {
     /// Comma-separated lists of hosts to perform the rollback
     #[clap(long, default_value = "")]
     hosts: String,
-
-    /// Keep all the secret
-    #[clap(long, default_value = "false")]
-    keep_secrets: bool,
 }
 
 #[derive(Parser)]
@@ -179,14 +159,9 @@ fn filter_hosts(host_spec: &str, hosts: &BTreeMap<String, Host>) -> Result<Vec<H
 fn install(
     args: &Args,
     install_args: &InstallArgs,
-    config: &mut Config,
+    config: &Config,
     flake: &NixosFlake,
 ) -> Result<()> {
-    config.global.keep_secrets = install_args.keep_secrets
-        || ask_yes_no(&format!(
-            "Do you want to keep secrets in {}? (y/n)",
-            config.global.secret_directory.display()
-        ));
     let hosts = filter_hosts(&install_args.hosts, &config.hosts)?;
     if !args.yes && !ask_yes_no(
             "Installing will remove any existing data from the configured hosts. Do you want to continue? (y/n)"
@@ -214,14 +189,9 @@ fn generate_config(
 fn dry_update(
     _args: &Args,
     dry_update_args: &DryUpdateArgs,
-    config: &mut Config,
+    config: &Config,
     flake: &NixosFlake,
 ) -> Result<()> {
-    config.global.keep_secrets = dry_update_args.keep_secrets
-        || ask_yes_no(&format!(
-            "Do you want to keep secrets in ./{}? (y/n)",
-            config.global.secret_directory.display()
-        ));
     let hosts = filter_hosts(&dry_update_args.hosts, &config.hosts)?;
     mgr::dry_update(&hosts, flake, &config.global.secret_directory)
 }
@@ -229,14 +199,9 @@ fn dry_update(
 fn update(
     _args: &Args,
     update_args: &UpdateArgs,
-    config: &mut Config,
+    config: &Config,
     flake: &NixosFlake,
 ) -> Result<()> {
-    config.global.keep_secrets = update_args.keep_secrets
-        || ask_yes_no(&format!(
-            "Do you want to keep secrets in ./{}? (y/n)",
-            config.global.secret_directory.display()
-        ));
     let hosts = filter_hosts(&update_args.hosts, &config.hosts)?;
     mgr::update(&hosts, flake, &config.global.secret_directory)
 }
@@ -244,14 +209,9 @@ fn update(
 fn rollback(
     _args: &Args,
     rollback_args: &RollbackArgs,
-    config: &mut Config,
+    config: &Config,
     flake: &NixosFlake,
 ) -> Result<()> {
-    config.global.keep_secrets = rollback_args.keep_secrets
-        || ask_yes_no(&format!(
-            "Do you want to keep secrets in ./{}? (y/n)",
-            config.global.secret_directory.display()
-        ));
     let hosts = filter_hosts(&rollback_args.hosts, &config.hosts)?;
     mgr::rollback(&hosts, flake, &config.global.secret_directory)
 }
@@ -310,7 +270,7 @@ pub fn main() -> Result<()> {
     let res = match args.action {
         Command::GenerateExample => Ok(println!("{}", ConfigFile::toml_example())),
         _ => {
-            let mut config = mgr::load_configuration(&args.config).with_context(|| {
+            let config = mgr::load_configuration(&args.config).with_context(|| {
                 format!(
                     "failed to parse configuration file: {}",
                     &args.config.display()
@@ -334,16 +294,12 @@ pub fn main() -> Result<()> {
                 Command::GenerateConfig(ref config_args) => {
                     generate_config(&args, config_args, &config, &flake)
                 }
-                Command::Install(ref install_args) => {
-                    install(&args, install_args, &mut config, &flake)
-                }
+                Command::Install(ref install_args) => install(&args, install_args, &config, &flake),
                 Command::DryUpdate(ref dry_update_args) => {
-                    dry_update(&args, dry_update_args, &mut config, &flake)
+                    dry_update(&args, dry_update_args, &config, &flake)
                 }
-                Command::Update(ref update_args) => update(&args, update_args, &mut config, &flake),
-                Command::Rollback(ref rollback_args) => {
-                    rollback(&args, rollback_args, &mut config, &flake)
-                }
+                Command::Update(ref update_args) => update(&args, update_args, &config, &flake),
+                Command::Rollback(ref rollback_args) => rollback(&args, rollback_args, &config, &flake),
                 Command::Ssh(ref ssh_args) => ssh(&args, ssh_args, &config),
                 Command::Reboot(ref reboot_args) => reboot(&args, reboot_args, &config),
                 Command::SystemInfo(ref args) => system_info(args, &config),

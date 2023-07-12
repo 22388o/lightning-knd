@@ -1,4 +1,3 @@
-use crate::utils::timeout_scp;
 use anyhow::{anyhow, bail, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use log::warn;
@@ -9,7 +8,7 @@ use serde_derive::Deserialize;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-use std::fs::{self, remove_dir_all};
+use std::fs;
 use std::hash::{Hash, Hasher};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -383,13 +382,7 @@ pub struct Global {
 
     /// Directory where the secrets are stored i.e. certificates
     #[serde(default = "default_secret_directory")]
-    #[toml_example(default = "secrets")]
     pub secret_directory: PathBuf,
-
-    #[serde(default)]
-    #[toml_example(skip)]
-    /// keep all the secerts on local machine
-    pub keep_secrets: bool,
 }
 
 fn validate_global(global: &Global, working_directory: &Path) -> Result<Global> {
@@ -657,44 +650,6 @@ pub struct Config {
     pub global: Global,
 }
 
-impl Drop for Config {
-    fn drop(&mut self) {
-        if self.global.keep_secrets {
-            let mut secret_update = false;
-            for (_, host) in self.hosts.iter() {
-                if host.nixos_module.as_str() == "kld-node" {
-                    for macaroon in ["access", "admin", "readonly"] {
-                        if let Err(e) = timeout_scp(
-                            host,
-                            format!("/var/lib/kld/macaroons/{macaroon}.macaroon"),
-                            &self.global.secret_directory,
-                        ) {
-                            panic!("Fail to copy {macaroon} macaroon: {e}");
-                        }
-                    }
-                    if let Err(e) = timeout_scp(
-                        host,
-                        "/var/lib/kld/mnemonic".into(),
-                        &self.global.secret_directory,
-                    ) {
-                        panic!("Fail to copy mnemonic: {e}");
-                    }
-                    if secret_update {
-                        panic!("Currently, only one kld-node for lightning cluster");
-                    }
-                    secret_update = true;
-                }
-            }
-            eprint!(
-                "secrets are listed in {}, please keep it safe",
-                self.global.secret_directory.display()
-            );
-        } else if let Err(e) = remove_dir_all(&self.global.secret_directory) {
-            eprintln!("Fail to clean up artifcats of secrets: {e}");
-        }
-    }
-}
-
 /// Parse toml configuration
 pub fn parse_config(content: &str, working_directory: &Path) -> Result<Config> {
     let config: ConfigFile = toml::from_str(content)?;
@@ -763,6 +718,7 @@ fn decode_token(s: String) -> Result<(String, String)> {
         .map(|(u, p)| (u.trim().to_string(), p.trim().to_string()))
         .ok_or(anyhow!("token should be `username: password` pair"))
 }
+
 #[cfg(test)]
 pub(crate) const TEST_CONFIG: &str = r#"
 [global]
