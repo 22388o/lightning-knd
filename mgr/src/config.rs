@@ -288,6 +288,9 @@ pub struct Host {
 
     /// Hash for monitoring config
     pub telegraf_config_hash: String,
+
+    /// mnemonic provide from mgr
+    pub kld_preset_mnemonic: bool,
 }
 
 impl Host {
@@ -295,6 +298,7 @@ impl Host {
     pub fn secrets(&self, secrets_dir: &Path) -> Result<Secrets> {
         let lightning = secrets_dir.join("lightning");
         let cockroachdb = secrets_dir.join("cockroachdb");
+        let mnemonic = secrets_dir.join("mnemonic");
 
         let mut secret_files = vec![
             // for kld
@@ -348,6 +352,12 @@ impl Host {
                     .context("failed to read node.key")?,
             ),
         ];
+        if mnemonic.exists() {
+            secret_files.push((
+                PathBuf::from("/var/lib/secrets/mnemonic"),
+                fs::read_to_string(mnemonic).context("failed to read mnemonic")?,
+            ))
+        }
         if let Some(KmonitorConfig {
             url,
             username,
@@ -382,6 +392,7 @@ pub struct Global {
 
     /// Directory where the secrets are stored i.e. certificates
     #[serde(default = "default_secret_directory")]
+    #[toml_example(default = "secrets")]
     pub secret_directory: PathBuf,
 }
 
@@ -393,7 +404,12 @@ fn validate_global(global: &Global, working_directory: &Path) -> Result<Global> 
     Ok(global)
 }
 
-fn validate_host(name: &str, host: &HostConfig, default: &HostConfig) -> Result<Host> {
+fn validate_host(
+    name: &str,
+    host: &HostConfig,
+    default: &HostConfig,
+    preset_mnemonic: bool,
+) -> Result<Host> {
     if !host.others.is_empty() {
         bail!(
             "{} are not allowed fields",
@@ -612,6 +628,7 @@ fn validate_host(name: &str, host: &HostConfig, default: &HostConfig) -> Result<
         telegraf_has_monitoring,
         telegraf_config_hash,
         kld_node_alias: host.kld_node_alias.clone(),
+        kld_preset_mnemonic: preset_mnemonic,
     })
 }
 
@@ -651,7 +668,11 @@ pub struct Config {
 }
 
 /// Parse toml configuration
-pub fn parse_config(content: &str, working_directory: &Path) -> Result<Config> {
+pub fn parse_config(
+    content: &str,
+    working_directory: &Path,
+    preset_mnemonic: bool,
+) -> Result<Config> {
     let config: ConfigFile = toml::from_str(content)?;
     let mut hosts = config
         .hosts
@@ -659,7 +680,7 @@ pub fn parse_config(content: &str, working_directory: &Path) -> Result<Config> {
         .map(|(name, host)| {
             Ok((
                 name.to_string(),
-                validate_host(name, host, &config.host_defaults)?,
+                validate_host(name, host, &config.host_defaults, preset_mnemonic)?,
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
@@ -698,7 +719,7 @@ pub fn parse_config(content: &str, working_directory: &Path) -> Result<Config> {
 }
 
 /// Load configuration from path
-pub fn load_configuration(path: &Path) -> Result<Config> {
+pub fn load_configuration(path: &Path, preset_mnemonic: bool) -> Result<Config> {
     let content = fs::read_to_string(path).context("Cannot read file")?;
     let working_directory = path.parent().with_context(|| {
         format!(
@@ -706,7 +727,7 @@ pub fn load_configuration(path: &Path) -> Result<Config> {
             path.display()
         )
     })?;
-    parse_config(&content, working_directory)
+    parse_config(&content, working_directory, preset_mnemonic)
 }
 
 fn decode_token(s: String) -> Result<(String, String)> {
@@ -755,7 +776,7 @@ ipv6_address = "2605:9880:400::4"
 pub fn test_parse_config() -> Result<()> {
     use std::str::FromStr;
 
-    let config = parse_config(TEST_CONFIG, Path::new("/"))?;
+    let config = parse_config(TEST_CONFIG, Path::new("/"), false)?;
     assert_eq!(config.global.flake, "github:myfork/near-staking-knd");
 
     let hosts = &config.hosts;
@@ -783,14 +804,18 @@ pub fn test_parse_config() -> Result<()> {
         IpAddr::from_str("2605:9880:400::1").ok()
     );
 
-    parse_config(TEST_CONFIG, Path::new("/"))?;
+    parse_config(TEST_CONFIG, Path::new("/"), false)?;
 
     Ok(())
 }
 
 #[test]
 pub fn test_parse_config_with_redundant_filds() {
-    let parse_result = parse_config(&format!("{}\nredundant = 111", TEST_CONFIG), Path::new("/"));
+    let parse_result = parse_config(
+        &format!("{}\nredundant = 111", TEST_CONFIG),
+        Path::new("/"),
+        false,
+    );
     assert!(parse_result.is_err());
 }
 
@@ -838,7 +863,7 @@ fn test_validate_host() -> Result<()> {
         ..Default::default()
     };
     assert_eq!(
-        validate_host("ipv4-only", &config, &HostConfig::default(),).unwrap(),
+        validate_host("ipv4-only", &config, &HostConfig::default(), false).unwrap(),
         Host {
             name: "ipv4-only".to_string(),
             nixos_module: "kld-node".to_string(),
@@ -869,24 +894,25 @@ fn test_validate_host() -> Result<()> {
             kmonitor_config: None,
             telegraf_has_monitoring: false,
             telegraf_config_hash: "13646096770106105413".to_string(),
+            kld_preset_mnemonic: false,
         }
     );
 
     // If `ipv6_address` is provied, the `ipv6_gateway` and `ipv6_cidr` should be provided too,
     // else the error will raise
     config.ipv6_address = Some("2607:5300:203:6cdf::".into());
-    assert!(validate_host("ipv4-only", &config, &HostConfig::default(),).is_err());
+    assert!(validate_host("ipv4-only", &config, &HostConfig::default(), false).is_err());
 
     config.ipv6_gateway = Some(
         "2607:5300:0203:6cff:00ff:00ff:00ff:00ff"
             .parse::<IpAddr>()
             .unwrap(),
     );
-    assert!(validate_host("ipv4-only", &config, &HostConfig::default(),).is_err());
+    assert!(validate_host("ipv4-only", &config, &HostConfig::default(), false).is_err());
 
     // The `ipv6_cidr` could be provided by subnet in address field
     config.ipv6_address = Some("2607:5300:203:6cdf::/64".into());
-    assert!(validate_host("ipv4-only", &config, &HostConfig::default(),).is_ok());
+    assert!(validate_host("ipv4-only", &config, &HostConfig::default(), false).is_ok());
 
     Ok(())
 }
